@@ -6,18 +6,34 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.image.Image;
 import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
+import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
+import java.awt.AWTException;
+import java.awt.Graphics2D;
+import java.awt.PopupMenu;
+import java.awt.RenderingHints;
+import java.awt.SystemTray;
+import java.awt.TrayIcon;
+import java.awt.image.BufferedImage;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.List;
+import java.util.prefs.Preferences;
 import java.util.stream.Collectors;
 
 public class CalendarApp extends Application {
@@ -30,6 +46,8 @@ public class CalendarApp extends Application {
     private ListView<String> eventDetailsView;
     private LocalDate selectedDate;
     private Label sidebarTitle;
+    private Stage primaryStage;
+    private TrayIcon trayIcon;
 
     // Color scheme
     private static final String PRIMARY_COLOR = "#4A90E2";
@@ -38,20 +56,44 @@ public class CalendarApp extends Application {
     private static final String BACKGROUND_COLOR = "#F5F7FA";
     private static final String CARD_COLOR = "#FFFFFF";
 
+    // Data file for persistent storage
+    private static final String DEFAULT_DATA_FILE = "calendar_events.dat";
+    private String dataFilePath;
+    private Preferences prefs;
+
     @Override
     public void start(Stage primaryStage) {
-        primaryStage.setTitle("Professional Calendar");
+        this.primaryStage = primaryStage;
+        primaryStage.setTitle("TaskFlow Calendar");
+
+        // Set window icon
+        primaryStage.getIcons().add(createWindowIcon());
+
+        // Prevent app from closing when all windows are closed
+        Platform.setImplicitExit(false);
+
+        // Initialize preferences and data file path
+        prefs = Preferences.userNodeForPackage(CalendarApp.class);
+        dataFilePath = prefs.get("dataFilePath", getDefaultDataPath());
 
         currentYearMonth = YearMonth.now();
         selectedDate = LocalDate.now(); // Initialize selected date to today
+
+        // Load saved events
+        loadEventsFromFile();
 
         // Main layout
         BorderPane mainLayout = new BorderPane();
         mainLayout.setStyle("-fx-background-color: " + BACKGROUND_COLOR + ";");
 
+        // Menu bar
+        MenuBar menuBar = createMenuBar();
+
         // Top bar with navigation
         HBox topBar = createTopBar();
-        mainLayout.setTop(topBar);
+
+        VBox topContainer = new VBox(menuBar, topBar);
+        mainLayout.setTop(topContainer);
 
         // Calendar grid in center
         VBox calendarContainer = createCalendarView();
@@ -63,10 +105,106 @@ public class CalendarApp extends Application {
 
         Scene scene = new Scene(mainLayout, 1200, 700);
         primaryStage.setScene(scene);
+
+        // Handle window close event - minimize to tray instead of closing
+        primaryStage.setOnCloseRequest(event -> {
+            event.consume(); // Prevent default close
+            hideToSystemTray();
+        });
+
         primaryStage.show();
+
+        // Set up system tray
+        setupSystemTray();
 
         // Start notification checker
         startReminderChecker();
+    }
+
+    private String getDefaultDataPath() {
+        // Default to user's home directory + Calendar folder
+        String userHome = System.getProperty("user.home");
+        File calendarDir = new File(userHome, "Calendar");
+        if (!calendarDir.exists()) {
+            calendarDir.mkdirs();
+        }
+        return new File(calendarDir, DEFAULT_DATA_FILE).getAbsolutePath();
+    }
+
+    private MenuBar createMenuBar() {
+        MenuBar menuBar = new MenuBar();
+
+        // File menu
+        Menu fileMenu = new Menu("File");
+
+        MenuItem saveItem = new MenuItem("Save Events");
+        saveItem.setOnAction(e -> {
+            saveEventsToFile();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Save Successful");
+            alert.setHeaderText(null);
+            alert.setContentText("All events have been saved successfully!");
+            alert.showAndWait();
+        });
+
+        MenuItem importItem = new MenuItem("Import Events...");
+        importItem.setOnAction(e -> importEvents());
+
+        MenuItem exportItem = new MenuItem("Export Events...");
+        exportItem.setOnAction(e -> exportEvents());
+
+        MenuItem changeLocationItem = new MenuItem("Change Data Location...");
+        changeLocationItem.setOnAction(e -> changeDataLocation());
+
+        MenuItem viewLocationItem = new MenuItem("View Current Data Location");
+        viewLocationItem.setOnAction(e -> {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Data Location");
+            alert.setHeaderText("Current data file location:");
+            alert.setContentText(dataFilePath);
+            alert.showAndWait();
+        });
+
+        MenuItem hideItem = new MenuItem("Minimize to Tray");
+        hideItem.setOnAction(e -> hideToSystemTray());
+
+        MenuItem exitItem = new MenuItem("Exit");
+        exitItem.setOnAction(e -> {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Exit Calendar");
+            confirm.setHeaderText("Are you sure you want to exit?");
+            confirm.setContentText("The application will close completely and notifications will stop.");
+
+            Optional<ButtonType> result = confirm.showAndWait();
+            if (result.isPresent() && result.get() == ButtonType.OK) {
+                saveEventsToFile(); // Save before exiting
+                if (timer != null) {
+                    timer.cancel();
+                }
+                if (trayIcon != null) {
+                    SystemTray.getSystemTray().remove(trayIcon);
+                }
+                Platform.exit();
+                System.exit(0);
+            }
+        });
+
+        fileMenu.getItems().addAll(
+                saveItem,
+                new SeparatorMenuItem(),
+                importItem,
+                exportItem,
+                new SeparatorMenuItem(),
+                changeLocationItem,
+                viewLocationItem,
+                new SeparatorMenuItem(),
+                hideItem,
+                new SeparatorMenuItem(),
+                exitItem
+        );
+        menuBar.getMenus().add(fileMenu);
+
+        return menuBar;
     }
 
     private HBox createTopBar() {
@@ -280,8 +418,78 @@ public class CalendarApp extends Application {
         if (dayEvents.isEmpty()) {
             eventDetailsView.setPlaceholder(new Label("No events on this day"));
         } else {
-            for (Event event : dayEvents) {
-                eventDetailsView.getItems().add(event.toString());
+            // Clear and rebuild the list with custom cell factory
+            eventDetailsView.setCellFactory(lv -> new EventListCell(date));
+            eventDetailsView.getItems().addAll(
+                    dayEvents.stream().map(Event::toString).collect(Collectors.toList())
+            );
+        }
+    }
+
+    private class EventListCell extends ListCell<String> {
+        private final LocalDate cellDate;
+
+        public EventListCell(LocalDate date) {
+            this.cellDate = date;
+        }
+
+        @Override
+        protected void updateItem(String item, boolean empty) {
+            super.updateItem(item, empty);
+
+            if (empty || item == null) {
+                setGraphic(null);
+                setText(null);
+            } else {
+                HBox container = new HBox(10);
+                container.setAlignment(Pos.CENTER_LEFT);
+
+                // Event details
+                Label eventLabel = new Label(item);
+                eventLabel.setWrapText(true);
+                eventLabel.setMaxWidth(200);
+                HBox.setHgrow(eventLabel, Priority.ALWAYS);
+
+                // Edit button
+                Button editBtn = new Button("Edit");
+                editBtn.setStyle("-fx-background-color: " + SECONDARY_COLOR + "; " +
+                        "-fx-text-fill: white; " +
+                        "-fx-font-size: 11px; " +
+                        "-fx-font-weight: bold; " +
+                        "-fx-padding: 5 10 5 10; " +
+                        "-fx-background-radius: 5; " +
+                        "-fx-cursor: hand;");
+                editBtn.setTooltip(new Tooltip("Edit Event"));
+
+                // Delete button
+                Button deleteBtn = new Button("Delete");
+                deleteBtn.setStyle("-fx-background-color: " + ACCENT_COLOR + "; " +
+                        "-fx-text-fill: white; " +
+                        "-fx-font-size: 11px; " +
+                        "-fx-font-weight: bold; " +
+                        "-fx-padding: 5 10 5 10; " +
+                        "-fx-background-radius: 5; " +
+                        "-fx-cursor: hand;");
+                deleteBtn.setTooltip(new Tooltip("Delete Event"));
+
+                int eventIndex = getIndex();
+                List<Event> dayEvents = eventsMap.get(cellDate);
+
+                if (dayEvents != null && eventIndex < dayEvents.size()) {
+                    Event event = dayEvents.get(eventIndex);
+
+                    editBtn.setOnAction(e -> {
+                        CalendarApp.this.showEditEventDialog(cellDate, event, eventIndex);
+                    });
+
+                    deleteBtn.setOnAction(e -> {
+                        CalendarApp.this.deleteEvent(cellDate, event, eventIndex);
+                    });
+                }
+
+                container.getChildren().addAll(eventLabel, editBtn, deleteBtn);
+                setGraphic(container);
+                setText(null);
             }
         }
     }
@@ -361,6 +569,9 @@ public class CalendarApp extends Application {
 
                 eventsMap.computeIfAbsent(date, k -> new ArrayList<>()).add(event);
 
+                // Save events to file
+                saveEventsToFile();
+
                 // Update selected date to show the new event
                 selectedDate = date;
                 updateCalendarView();
@@ -372,6 +583,150 @@ public class CalendarApp extends Application {
         });
 
         dialog.showAndWait();
+    }
+
+    private void showEditEventDialog(LocalDate date, Event existingEvent, int eventIndex) {
+        Dialog<Event> dialog = new Dialog<>();
+        dialog.setTitle("Edit Event");
+        dialog.setHeaderText("Update event details");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(15);
+        grid.setVgap(15);
+        grid.setPadding(new Insets(20));
+
+        TextField titleField = new TextField(existingEvent.title);
+        titleField.setPromptText("Event title");
+
+        DatePicker datePicker = new DatePicker(date);
+
+        Spinner<Integer> hourSpinner = new Spinner<>(0, 23, existingEvent.dateTime.getHour());
+        Spinner<Integer> minuteSpinner = new Spinner<>(0, 59, existingEvent.dateTime.getMinute());
+        hourSpinner.setPrefWidth(80);
+        minuteSpinner.setPrefWidth(80);
+
+        TextArea descField = new TextArea(existingEvent.description);
+        descField.setPromptText("Event description (optional)");
+        descField.setPrefRowCount(3);
+
+        // Multiple reminders - pre-check based on existing event
+        Label remindersLabel = new Label("Reminders:");
+        remindersLabel.setFont(Font.font("System", FontWeight.BOLD, 12));
+
+        VBox remindersBox = new VBox(10);
+        CheckBox reminder1 = new CheckBox("1 day before");
+        CheckBox reminder2 = new CheckBox("1 hour before");
+        CheckBox reminder3 = new CheckBox("30 minutes before");
+        CheckBox reminder4 = new CheckBox("10 minutes before");
+        CheckBox reminder5 = new CheckBox("At event time");
+
+        // Pre-select existing reminders
+        for (Integer minutes : existingEvent.reminderMinutes) {
+            if (minutes == 1440) reminder1.setSelected(true);
+            else if (minutes == 60) reminder2.setSelected(true);
+            else if (minutes == 30) reminder3.setSelected(true);
+            else if (minutes == 10) reminder4.setSelected(true);
+            else if (minutes == 0) reminder5.setSelected(true);
+        }
+
+        remindersBox.getChildren().addAll(reminder1, reminder2, reminder3, reminder4, reminder5);
+
+        HBox timeBox = new HBox(10, hourSpinner, new Label(":"), minuteSpinner);
+        timeBox.setAlignment(Pos.CENTER_LEFT);
+
+        grid.add(new Label("Title:"), 0, 0);
+        grid.add(titleField, 1, 0);
+        grid.add(new Label("Date:"), 0, 1);
+        grid.add(datePicker, 1, 1);
+        grid.add(new Label("Time:"), 0, 2);
+        grid.add(timeBox, 1, 2);
+        grid.add(new Label("Description:"), 0, 3);
+        grid.add(descField, 1, 3);
+        grid.add(remindersLabel, 0, 4);
+        grid.add(remindersBox, 1, 4);
+
+        dialog.getDialogPane().setContent(grid);
+
+        ButtonType saveBtn = new ButtonType("Save Changes", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveBtn, ButtonType.CANCEL);
+
+        dialog.setResultConverter(btn -> {
+            if (btn == saveBtn && !titleField.getText().trim().isEmpty()) {
+                String title = titleField.getText().trim();
+                LocalDate newDate = datePicker.getValue();
+                LocalTime time = LocalTime.of(hourSpinner.getValue(), minuteSpinner.getValue());
+                LocalDateTime eventDateTime = LocalDateTime.of(newDate, time);
+                String description = descField.getText().trim();
+
+                List<Integer> reminderMinutes = new ArrayList<>();
+                if (reminder1.isSelected()) reminderMinutes.add(1440);
+                if (reminder2.isSelected()) reminderMinutes.add(60);
+                if (reminder3.isSelected()) reminderMinutes.add(30);
+                if (reminder4.isSelected()) reminderMinutes.add(10);
+                if (reminder5.isSelected()) reminderMinutes.add(0);
+
+                // Remove old event
+                List<Event> oldDateEvents = eventsMap.get(date);
+                if (oldDateEvents != null) {
+                    oldDateEvents.remove(eventIndex);
+                    if (oldDateEvents.isEmpty()) {
+                        eventsMap.remove(date);
+                    }
+                }
+
+                // Add updated event
+                Event updatedEvent = new Event(title, eventDateTime, description, reminderMinutes);
+                eventsMap.computeIfAbsent(newDate, k -> new ArrayList<>()).add(updatedEvent);
+
+                // Save changes
+                saveEventsToFile();
+
+                // Update view
+                selectedDate = newDate;
+                updateCalendarView();
+                updateEventDetailsView(newDate);
+
+                return updatedEvent;
+            }
+            return null;
+        });
+
+        dialog.showAndWait();
+    }
+
+    private void deleteEvent(LocalDate date, Event event, int eventIndex) {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Delete Event");
+        confirm.setHeaderText("Are you sure you want to delete this event?");
+        confirm.setContentText("Event: " + event.title + "\nTime: " +
+                event.dateTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy HH:mm")));
+
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (result.isPresent() && result.get() == ButtonType.OK) {
+            List<Event> dayEvents = eventsMap.get(date);
+            if (dayEvents != null) {
+                dayEvents.remove(eventIndex);
+
+                // Remove date from map if no more events
+                if (dayEvents.isEmpty()) {
+                    eventsMap.remove(date);
+                }
+
+                // Save changes
+                saveEventsToFile();
+
+                // Update view
+                updateCalendarView();
+                updateEventDetailsView(date);
+
+                // Show confirmation
+                Alert success = new Alert(Alert.AlertType.INFORMATION);
+                success.setTitle("Event Deleted");
+                success.setHeaderText(null);
+                success.setContentText("Event deleted successfully!");
+                success.show();
+            }
+        }
     }
 
     private void startReminderChecker() {
@@ -399,6 +754,400 @@ public class CalendarApp extends Application {
                 }
             }
         }, 0, 30_000); // Check every 30 seconds
+    }
+
+    private void setupSystemTray() {
+        // Check if system tray is supported
+        if (!SystemTray.isSupported()) {
+            System.out.println("System tray is not supported");
+            return;
+        }
+
+        SystemTray systemTray = SystemTray.getSystemTray();
+
+        // Create tray icon image
+        BufferedImage trayIconImage = createTrayIcon();
+
+        // Create popup menu
+        PopupMenu popup = new PopupMenu();
+
+        // Use java.awt.MenuItem explicitly for system tray
+        java.awt.MenuItem openItem = new java.awt.MenuItem("Open Calendar");
+        openItem.addActionListener(e -> Platform.runLater(this::showWindow));
+
+        java.awt.MenuItem exitItem = new java.awt.MenuItem("Exit");
+        exitItem.addActionListener(e -> {
+            Platform.runLater(() -> {
+                saveEventsToFile(); // Save before exiting
+                if (timer != null) {
+                    timer.cancel();
+                }
+                systemTray.remove(trayIcon);
+                Platform.exit();
+                System.exit(0);
+            });
+        });
+
+        popup.add(openItem);
+        popup.addSeparator();
+        popup.add(exitItem);
+
+        // Create tray icon
+        trayIcon = new TrayIcon(trayIconImage, "TaskFlow Calendar", popup);
+        trayIcon.setImageAutoSize(true);
+
+        // Double-click to open
+        trayIcon.addActionListener(e -> Platform.runLater(this::showWindow));
+
+        try {
+            systemTray.add(trayIcon);
+        } catch (AWTException e) {
+            System.err.println("Unable to add tray icon");
+            e.printStackTrace();
+        }
+    }
+
+    private BufferedImage createTrayIcon() {
+        // Create a simple calendar icon
+        int size = 16;
+        BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = image.createGraphics();
+
+        // Enable anti-aliasing
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // Draw calendar icon (using java.awt.Color explicitly)
+        g.setColor(new java.awt.Color(74, 144, 226)); // PRIMARY_COLOR
+        g.fillRoundRect(1, 3, 14, 12, 3, 3);
+
+        g.setColor(java.awt.Color.WHITE);
+        g.fillRect(2, 1, 3, 3);
+        g.fillRect(11, 1, 3, 3);
+
+        g.setColor(java.awt.Color.WHITE);
+        g.setFont(new java.awt.Font("Arial", java.awt.Font.BOLD, 8));
+        g.drawString(String.valueOf(LocalDate.now().getDayOfMonth()), 5, 12);
+
+        g.dispose();
+        return image;
+    }
+
+    private void hideToSystemTray() {
+        primaryStage.hide();
+
+        // Show notification that app is still running
+        if (trayIcon != null) {
+            trayIcon.displayMessage("Calendar Running",
+                    "The calendar is still running in the background. Notifications will continue.",
+                    TrayIcon.MessageType.INFO);
+        }
+    }
+
+    private void showWindow() {
+        primaryStage.show();
+        primaryStage.toFront();
+    }
+
+    private Image createWindowIcon() {
+        // Create a calendar icon for the window
+        int size = 64;
+        BufferedImage bufferedImage = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = bufferedImage.createGraphics();
+
+        // Enable anti-aliasing
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // Draw calendar background
+        g.setColor(new java.awt.Color(74, 144, 226)); // PRIMARY_COLOR
+        g.fillRoundRect(8, 16, 48, 40, 8, 8);
+
+        // Draw calendar header (darker blue)
+        g.setColor(new java.awt.Color(50, 100, 180));
+        g.fillRoundRect(8, 16, 48, 12, 8, 8);
+        g.fillRect(8, 20, 48, 8);
+
+        // Draw binding rings
+        g.setColor(java.awt.Color.WHITE);
+        g.fillOval(16, 10, 8, 8);
+        g.fillOval(40, 10, 8, 8);
+
+        // Draw grid lines
+        g.setColor(new java.awt.Color(255, 255, 255, 100));
+        g.drawLine(20, 32, 44, 32);
+        g.drawLine(20, 40, 44, 40);
+        g.drawLine(20, 48, 44, 48);
+        g.drawLine(28, 28, 28, 52);
+        g.drawLine(36, 28, 36, 52);
+
+        // Draw current day highlight
+        g.setColor(new java.awt.Color(255, 107, 107)); // ACCENT_COLOR
+        g.fillOval(38, 42, 6, 6);
+
+        g.dispose();
+
+        // Convert BufferedImage to JavaFX Image
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(bufferedImage, "png", baos);
+            return new Image(new ByteArrayInputStream(baos.toByteArray()));
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private void saveEventsToFile() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(dataFilePath))) {
+            for (Map.Entry<LocalDate, List<Event>> entry : eventsMap.entrySet()) {
+                LocalDate date = entry.getKey();
+                for (Event event : entry.getValue()) {
+                    // Format: DATE|TITLE|TIME|DESCRIPTION|REMINDERS
+                    String reminders = event.reminderMinutes.stream()
+                            .map(String::valueOf)
+                            .collect(Collectors.joining(","));
+
+                    String line = String.format("%s|%s|%s|%s|%s",
+                            date.toString(),
+                            escapeString(event.title),
+                            event.dateTime.toLocalTime().toString(),
+                            escapeString(event.description),
+                            reminders
+                    );
+                    writer.println(line);
+                }
+            }
+            System.out.println("Events saved successfully to " + dataFilePath);
+        } catch (IOException e) {
+            System.err.println("Error saving events: " + e.getMessage());
+            e.printStackTrace();
+            showErrorAlert("Error Saving Events", "Could not save events to file: " + e.getMessage());
+        }
+    }
+
+    private void loadEventsFromFile() {
+        File file = new File(dataFilePath);
+        if (!file.exists()) {
+            System.out.println("No saved events found at: " + dataFilePath);
+            return;
+        }
+
+        eventsMap.clear(); // Clear existing events before loading
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            int loadedCount = 0;
+            while ((line = reader.readLine()) != null) {
+                try {
+                    String[] parts = line.split("\\|");
+                    if (parts.length >= 5) {
+                        LocalDate date = LocalDate.parse(parts[0]);
+                        String title = unescapeString(parts[1]);
+                        LocalTime time = LocalTime.parse(parts[2]);
+                        String description = unescapeString(parts[3]);
+
+                        List<Integer> reminders = new ArrayList<>();
+                        if (!parts[4].isEmpty()) {
+                            String[] reminderParts = parts[4].split(",");
+                            for (String r : reminderParts) {
+                                reminders.add(Integer.parseInt(r.trim()));
+                            }
+                        }
+
+                        LocalDateTime dateTime = LocalDateTime.of(date, time);
+                        Event event = new Event(title, dateTime, description, reminders);
+
+                        eventsMap.computeIfAbsent(date, k -> new ArrayList<>()).add(event);
+                        loadedCount++;
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error parsing line: " + line);
+                    e.printStackTrace();
+                }
+            }
+            System.out.println("Loaded " + loadedCount + " events from file.");
+        } catch (IOException e) {
+            System.err.println("Error loading events: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void importEvents() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Import Events");
+        fileChooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("Calendar Data Files", "*.dat")
+        );
+        fileChooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("All Files", "*.*")
+        );
+
+        File selectedFile = fileChooser.showOpenDialog(primaryStage);
+        if (selectedFile != null) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Import Events");
+            confirm.setHeaderText("How would you like to import?");
+            confirm.setContentText("Choose import option:");
+
+            ButtonType mergeBtn = new ButtonType("Merge with Current");
+            ButtonType replaceBtn = new ButtonType("Replace All");
+            ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+
+            confirm.getButtonTypes().setAll(mergeBtn, replaceBtn, cancelBtn);
+
+            Optional<ButtonType> result = confirm.showAndWait();
+
+            if (result.isPresent() && result.get() == mergeBtn) {
+                // Merge: Load and add to existing events
+                importAndMerge(selectedFile);
+            } else if (result.isPresent() && result.get() == replaceBtn) {
+                // Replace: Clear current and load new
+                eventsMap.clear();
+                String tempPath = dataFilePath;
+                dataFilePath = selectedFile.getAbsolutePath();
+                loadEventsFromFile();
+                dataFilePath = tempPath;
+                saveEventsToFile(); // Save merged data to current location
+                updateCalendarView();
+                updateEventDetailsView(selectedDate);
+
+                Alert success = new Alert(Alert.AlertType.INFORMATION);
+                success.setTitle("Import Complete");
+                success.setHeaderText(null);
+                success.setContentText("Events replaced successfully!");
+                success.showAndWait();
+            }
+        }
+    }
+
+    private void importAndMerge(File importFile) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(importFile))) {
+            String line;
+            int importedCount = 0;
+            while ((line = reader.readLine()) != null) {
+                try {
+                    String[] parts = line.split("\\|");
+                    if (parts.length >= 5) {
+                        LocalDate date = LocalDate.parse(parts[0]);
+                        String title = unescapeString(parts[1]);
+                        LocalTime time = LocalTime.parse(parts[2]);
+                        String description = unescapeString(parts[3]);
+
+                        List<Integer> reminders = new ArrayList<>();
+                        if (!parts[4].isEmpty()) {
+                            String[] reminderParts = parts[4].split(",");
+                            for (String r : reminderParts) {
+                                reminders.add(Integer.parseInt(r.trim()));
+                            }
+                        }
+
+                        LocalDateTime dateTime = LocalDateTime.of(date, time);
+                        Event event = new Event(title, dateTime, description, reminders);
+
+                        eventsMap.computeIfAbsent(date, k -> new ArrayList<>()).add(event);
+                        importedCount++;
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error parsing line during import: " + line);
+                }
+            }
+
+            saveEventsToFile(); // Save merged data
+            updateCalendarView();
+            updateEventDetailsView(selectedDate);
+
+            Alert success = new Alert(Alert.AlertType.INFORMATION);
+            success.setTitle("Import Complete");
+            success.setHeaderText(null);
+            success.setContentText(importedCount + " events imported and merged successfully!");
+            success.showAndWait();
+
+        } catch (IOException e) {
+            showErrorAlert("Import Error", "Could not import events: " + e.getMessage());
+        }
+    }
+
+    private void exportEvents() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Export Events");
+        fileChooser.setInitialFileName("calendar_backup_" + LocalDate.now() + ".dat");
+        fileChooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("Calendar Data Files", "*.dat")
+        );
+
+        File selectedFile = fileChooser.showSaveDialog(primaryStage);
+        if (selectedFile != null) {
+            try {
+                Files.copy(Paths.get(dataFilePath), selectedFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+
+                Alert success = new Alert(Alert.AlertType.INFORMATION);
+                success.setTitle("Export Successful");
+                success.setHeaderText(null);
+                success.setContentText("Events exported successfully to:\n" + selectedFile.getAbsolutePath());
+                success.showAndWait();
+            } catch (IOException e) {
+                showErrorAlert("Export Error", "Could not export events: " + e.getMessage());
+            }
+        }
+    }
+
+    private void changeDataLocation() {
+        Alert info = new Alert(Alert.AlertType.INFORMATION);
+        info.setTitle("Change Data Location");
+        info.setHeaderText("Select a new folder for storing calendar data");
+        info.setContentText("Your current events will be moved to the new location.");
+        info.showAndWait();
+
+        DirectoryChooser dirChooser = new DirectoryChooser();
+        dirChooser.setTitle("Choose Data Storage Folder");
+
+        File currentDir = new File(dataFilePath).getParentFile();
+        if (currentDir.exists()) {
+            dirChooser.setInitialDirectory(currentDir);
+        }
+
+        File selectedDir = dirChooser.showDialog(primaryStage);
+        if (selectedDir != null) {
+            String newPath = new File(selectedDir, DEFAULT_DATA_FILE).getAbsolutePath();
+
+            try {
+                // Copy current data to new location
+                File oldFile = new File(dataFilePath);
+                if (oldFile.exists()) {
+                    Files.copy(oldFile.toPath(), Paths.get(newPath), StandardCopyOption.REPLACE_EXISTING);
+                }
+
+                // Update data file path
+                dataFilePath = newPath;
+                prefs.put("dataFilePath", dataFilePath);
+
+                Alert success = new Alert(Alert.AlertType.INFORMATION);
+                success.setTitle("Location Changed");
+                success.setHeaderText("Data location updated successfully!");
+                success.setContentText("New location: " + dataFilePath);
+                success.showAndWait();
+
+            } catch (IOException e) {
+                showErrorAlert("Error", "Could not move data file: " + e.getMessage());
+            }
+        }
+    }
+
+    private void showErrorAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        alert.showAndWait();
+    }
+
+    private String escapeString(String str) {
+        if (str == null) return "";
+        return str.replace("|", "&#124;").replace("\n", "&#10;");
+    }
+
+    private String unescapeString(String str) {
+        if (str == null) return "";
+        return str.replace("&#124;", "|").replace("&#10;", "\n");
     }
 
     private void showNotification(Event event, int minutesBefore) {
