@@ -213,7 +213,7 @@ public class CalendarApp extends Application {
         topBar.setAlignment(Pos.CENTER_LEFT);
         topBar.setStyle("-fx-background-color: " + PRIMARY_COLOR + ";");
 
-        Label title = new Label("📅 My Calendar");
+        Label title = new Label("📅 Calendar");
         title.setFont(Font.font("System", FontWeight.BOLD, 24));
         title.setTextFill(Color.WHITE);
 
