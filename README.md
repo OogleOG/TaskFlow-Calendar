@@ -236,7 +236,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📸 Screenshots
 
-*Coming soon - screenshots of the application in action*
+<img width="1196" height="726" alt="image" src="https://github.com/user-attachments/assets/114a9ed9-60d5-4460-92f7-1e83bb42dabf" />
+
+<img width="598" height="481" alt="image" src="https://github.com/user-attachments/assets/10ccd9fe-3bc2-4761-81eb-f705812c9d8e" />
+
+
 
 ---
 
