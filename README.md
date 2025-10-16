@@ -72,7 +72,7 @@ A professional, feature-rich desktop calendar application built with JavaFX. Tas
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/taskflow-calendar.git
+git clone https://github.com/OogleOG/taskflow-calendar.git
 cd taskflow-calendar
 ```
 
@@ -95,7 +95,7 @@ gradle prepareJpackage
 # Create installer (requires JDK with jpackage tool)
 jpackage --input build/jpackage-input \
   --name "TaskFlowCalendar" \
-  --vendor "Oogle" \
+  --vendor "Prodexa" \
   --main-jar calender.jar \
   --main-class org.oogle.calender.CalendarApp \
   --icon calendar-icon.ico \
